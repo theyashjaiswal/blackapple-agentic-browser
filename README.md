@@ -1,129 +1,108 @@
 # BlackApple Agentic Browser
 
-> Headless browser for AI agent orchestration — fast, multi-agent-safe, cross-platform.
+> Headless browser for AI agent orchestration — **context-pooled**, bottleneck-proof, cross-platform.
 
-**BlackApple** wraps Chromium via Playwright (CDP) into a session-pooled API, so multiple AI agents can drive browsers simultaneously without conflicts.
+**BlackApple** wraps Chromium via Playwright (CDP) into a **context-pooled** API. One Chromium process handles 20 isolated contexts (~300MB total). Agents drive browsers without launching new processes per request.
 
 ---
 
 ## Architecture
 
 ```
-Agent (Hermes/Claude/GPT)
-    ↓ HTTP / WebSocket
-API Server (Express + WS)     ←– controls –→ Session Pool
-                                                    ↓
-                                          BrowserEngine (Playwright/Chromium)
-                                                    ↓
-                                              Chromium (headless)
+Hermes Agent(s)
+     ↓
+BlackApple SDK (retry + backoff)
+     ↓
+Load Balancer (nginx/traefik) ← Phase 4
+     ↓
+API Node(s) (stateless)
+     ↓
+Redis (session registry) ← Phase 2
+     ↓
+Browser Pool Manager (per node)
+     ├── Chromium process 1 → up to 20 contexts
+     ├── Chromium process 2 → up to 20 contexts
+     └── Browser process N (RAM-capped)
+     ↓
+Chromium (via Playwright/CDP)
 ```
+
+## Key Design: Context Pooling
+
+| Model | 20 Sessions RAM | Launch Time |
+|-------|----------------|-------------|
+| 20 browsers × 1 context | ~3GB | ~20s cold |
+| **1 browser × 20 contexts** | **~300MB** | **~200ms** |
+| 3 browsers × ~7 contexts | ~500MB | ~1s |
+
+One Chromium, many isolated contexts. This is 10x more memory-efficient than full browser pooling.
 
 ## Packages
 
-| Package | Description |
-|---------|-------------|
-| `@blackapple/agentic-browser-core` | `BrowserEngine`, `BrowserSession`, `SessionPool` — the core library |
-| `@blackapple/agentic-browser-api` | REST + WebSocket API server (Express, port 3333) |
-| `@blackapple/agentic-browser-sdk` | TypeScript SDK — for agents to connect |
-| `@blackapple/agentic-browser-cli` | Terminal CLI tool |
-| `Dockerfile` | Single-container deploy (Alpine + Node + Chromium) |
+| Package | Status | Purpose |
+|---------|--------|---------|
+| `@blackapple/agentic-browser-core` | ✅ Phase 1 | `ContextPool`, `BrowserSession` |
+| `@blackapple/agentic-browser-api` | ✅ Phase 1 | REST + WebSocket server |
+| `@blackapple/agentic-browser-sdk` | ✅ Phase 1 | TypeScript client |
+| `@blackapple/agentic-browser-cli` | ✅ Phase 1 | Terminal CLI |
+| `Dockerfile` | ✅ Phase 1 | Alpine + Chromium |
+| Redis registry | 🔜 Phase 2 | sessionId → nodeId routing |
+| RAM ceilings + watchdog | 🔜 Phase 3 | resource limits |
+| Multi-node + LB | 🔜 Phase 4 | horizontal scale |
 
 ## Quick Start
-
-### 1. Install
 
 ```bash
 git clone https://github.com/theyashjaiswal/blackapple-agentic-browser.git
 cd blackapple-agentic-browser
 npm install
-```
-
-### 2. Start API Server
-
-```bash
 cd packages/api && npm run dev
 # → Listening on http://localhost:3333
-# → WS endpoint: ws://localhost:3333
 ```
 
-### 3. Use from any agent
+## Usage
 
-**TypeScript SDK:**
 ```typescript
 import { BlackApple } from '@blackapple/agentic-browser-sdk';
 
 const browser = new BlackApple({ baseUrl: 'http://localhost:3333' });
 
-// Acquire session
+// Acquire session (backpressure: waits if pool exhausted)
 const { sessionId } = await browser.acquireSession();
 
 // Navigate
-await browser.navigate(sessionId, 'https://example.com');
+const { title, loadTime } = await browser.navigate(sessionId, 'https://example.com');
 
-// Release (return to pool)
+// Release back to pool (reused by next agent)
 await browser.releaseSession(sessionId);
 ```
 
-**REST API:**
-```bash
-curl http://localhost:3333/health
-curl -X POST http://localhost:3333/v1/sessions/acquire
-curl -X POST http://localhost:3333/v1/sessions/<id>/release
+## REST API
+
+```
+GET  /health                    → { nodeId, queueDepth, stats }
+GET  /v1/pool/stats             → { activeContexts, availableContexts, browsers }
+POST /v1/sessions/acquire        → { id, browserId, nodeId }
+POST /v1/sessions/:id/release    → { released: true }
+POST /v1/sessions/:id/navigate  → { url, title, loadTime, status }
 ```
 
-**CLI:**
-```bash
-npm install -g @blackapple/agentic-browser-cli
-blackapple stats
-blackapple acquire
-blackapple navigate <session-id> https://example.com
-```
-
-### 4. Docker
+## Docker
 
 ```bash
 docker build -t blackapple .
 docker run -p 3333:3333 blackapple
 ```
 
-## Features
+## Bottleneck Proofing
 
-- **Session pooling** — max concurrency cap, warm sessions, TTL-based cleanup
-- **Full CDP access** — navigate, click, fill, type, evaluate JS, screenshot, PDF, network interception
-- **REST + WebSocket** — HTTP for simple commands, WS for streaming/long-running sessions
-- **TypeScript SDK** — type-safe client for any agent framework
-- **Docker-ready** — single Alpine image, no Playwright browser download needed
-- **Cross-platform** — Linux, macOS, Windows
-
-## API Reference
-
-### REST
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Health check + pool stats |
-| `GET` | `/v1/pool/stats` | Current pool stats |
-| `POST` | `/v1/sessions/acquire` | Acquire session from pool |
-| `POST` | `/v1/sessions/:id/release` | Release session back to pool |
-
-### WebSocket
-
-```json
-{ "id": 1, "method": "session.acquire" }
-{ "id": 1, "method": "session.release" }
-{ "id": 1, "method": "pool.stats" }
-```
-
-## Session Pool Config
-
-```typescript
-const pool = new SessionPool({
-  maxSessions: 10,      // max concurrent sessions
-  minSessions: 2,       // warm sessions kept alive
-  sessionTTL: 300_000,  // 5 min — sessions auto-close after this
-  acquireTimeout: 30_000,
-}, { headless: true });
-```
+| Bottleneck | Fix |
+|------------|-----|
+| Browser-per-request | Context pooling (one Chromium, 20 contexts) |
+| Single API node | Stateless nodes + Redis session registry (Phase 2) |
+| Unbounded growth | RAM budget auto-calculates max contexts |
+| Retry storms | Backpressure: queue-depth signal in 503 responses |
+| Crashed browsers | Auto-relaunch on crash (Phase 3) |
 
 ## License
 
