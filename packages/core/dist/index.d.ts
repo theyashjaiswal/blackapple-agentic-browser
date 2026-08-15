@@ -1,5 +1,5 @@
-export { BrowserEngine, SessionPool } from './pool.js';
+export { ContextPool } from './pool.js';
 export { BrowserSession } from './session.js';
-export type { BrowserLaunchOptions, SessionOptions, PageMetrics, NavigateOptions, ClickOptions, TypeOptions, EvaluateOptions, SessionInfo, PoolStats, PoolOptions, } from './types.js';
-export { BlackAppleError, SessionNotFoundError, PoolExhaustedError, TimeoutError, } from './types.js';
+export { PoolExhaustedError } from './types.js';
+export type { PoolOptions, PoolStats, SessionOptions, } from './types.js';
 //# sourceMappingURL=index.d.ts.map

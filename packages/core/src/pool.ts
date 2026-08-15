@@ -1,110 +1,223 @@
-// BlackApple Agentic Browser — Session Pool
+// BlackApple Agentic Browser — Phase 1: Context Pooling
+//
+// CRITICAL ARCHITECTURE: We pool BrowserContext, NOT full browsers.
+// One Chromium process + 20 contexts = ~300MB
+// 20 browsers × 1 context = ~3GB
+// Context pooling is 10x more memory efficient.
+
 import { randomUUID } from 'crypto';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import type { BrowserLaunchOptions, SessionOptions, PoolOptions, PoolStats } from './types.js';
-import { BrowserSession } from './session.js';
-import { PoolExhaustedError } from './types.js';
+import { chromium, type Browser, type BrowserContext } from 'playwright';
 
-export class BrowserEngine {
+export interface SessionOptions {
+  viewport?: { width: number; height: number };
+  userAgent?: string;
+  javaScriptEnabled?: boolean;
+  ignoreHTTPSErrors?: boolean;
+}
+
+export interface PoolOptions {
+  /** Max concurrent contexts across ALL browsers */
+  maxContexts: number;
+  /** Max contexts per single Chromium process */
+  maxContextsPerBrowser?: number;
+  /** Min warm contexts to keep ready */
+  minWarmContexts?: number;
+  /** Kill context after N ms of inactivity */
+  idleTimeoutMs?: number;
+  /** Kill context after N ms since creation */
+  maxLifetimeMs?: number;
+  /** Kill context if browser process uses > N MB */
+  maxContextMemoryMB?: number;
+  /** Ram budget per node in MB (auto-calculates maxContexts if not set) */
+  ramBudgetMB?: number;
+}
+
+export interface Session {
+  readonly id: string;
+  readonly createdAt: Date;
+  context: BrowserContext;
+  browserId: string; // which BrowserManager owns this
+  lastUsed: Date;
+  close(): Promise<void>;
+}
+
+export interface PoolStats {
+  totalContexts: number;
+  activeContexts: number;
+  availableContexts: number;
+  pendingAcquires: number;
+  browsers: number;
+  maxContexts: number;
+  memoryUsageMB?: number;
+}
+
+// ── BrowserManager ────────────────────────────────────────────────────────────
+// Owns ONE Chromium process and manages contexts within it.
+
+class BrowserManager {
+  readonly id = randomUUID();
   private browser: Browser | null = null;
-  private launched = false;
-  private options: Required<BrowserLaunchOptions>;
+  private contexts: Set<BrowserContext> = new Set();
+  readonly maxContexts: number;
 
-  constructor(options: BrowserLaunchOptions = {}) {
-    this.options = {
-      headless: options.headless ?? true,
-      args: options.args ?? ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-      userAgent: options.userAgent ?? 'BlackApple/1.0',
-      timeout: options.timeout ?? 30000,
-    };
+  constructor(private options: {
+    headless?: boolean;
+    args?: string[];
+    userAgent?: string;
+  }, maxContextsPerBrowser: number) {
+    this.maxContexts = maxContextsPerBrowser;
   }
 
   async launch(): Promise<void> {
-    if (this.launched) return;
+    if (this.browser) return;
     this.browser = await chromium.launch({
-      headless: this.options.headless,
-      args: this.options.args,
+      headless: this.options.headless ?? true,
+      args: this.options.args ?? [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+      ],
     });
-    this.launched = true;
   }
 
-  async createSession(sessionOptions: SessionOptions = {}): Promise<BrowserSession> {
+  async createContext(opts: SessionOptions = {}): Promise<BrowserContext> {
     if (!this.browser) await this.launch();
-    const context = await this.browser!.newContext({
-      viewport: sessionOptions.viewport ?? { width: 1280, height: 720 },
-      userAgent: sessionOptions.userAgent ?? this.options.userAgent,
-      javaScriptEnabled: sessionOptions.javaScriptEnabled ?? true,
-      ignoreHTTPSErrors: sessionOptions.ignoreHTTPSErrors ?? false,
+    const ctx = await this.browser!.newContext({
+      viewport: opts.viewport ?? { width: 1280, height: 720 },
+      userAgent: opts.userAgent ?? 'BlackApple/1.0 (+https://github.com/theyashjaiswal/blackapple-agentic-browser)',
+      javaScriptEnabled: opts.javaScriptEnabled ?? true,
+      ignoreHTTPSErrors: opts.ignoreHTTPSErrors ?? false,
     });
-    const page = await context.newPage();
-    const id = randomUUID();
-    return new BrowserSession(id, context, page);
+    this.contexts.add(ctx);
+    return ctx;
+  }
+
+  async closeContext(ctx: BrowserContext): Promise<void> {
+    try {
+      await ctx.close();
+    } catch { /* ignore */ }
+    this.contexts.delete(ctx);
+  }
+
+  get activeCount(): number {
+    return this.contexts.size;
+  }
+
+  get hasCapacity(): boolean {
+    return this.contexts.size < this.maxContexts;
   }
 
   async close(): Promise<void> {
     await this.browser?.close();
     this.browser = null;
-    this.launched = false;
-  }
-
-  isLaunched(): boolean {
-    return this.launched;
+    this.contexts.clear();
   }
 }
 
-export class SessionPool {
-  private engine: BrowserEngine;
-  private available: BrowserSession[] = [];
-  private active: Map<string, BrowserSession> = new Map();
-  private pending: Array<{
-    resolve: (session: BrowserSession) => void;
-    reject: (err: Error) => void;
-    createdAt: number;
-  }> = [];
-  private options: Required<PoolOptions>;
-  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+// ── Session ───────────────────────────────────────────────────────────────────
 
-  constructor(options: PoolOptions, engineOptions: BrowserLaunchOptions = {}) {
-    this.options = {
-      maxSessions: options.maxSessions,
-      minSessions: options.minSessions ?? 2,
-      sessionTTL: options.sessionTTL ?? 300000,
-      acquireTimeout: options.acquireTimeout ?? 30000,
-    };
-    this.engine = new BrowserEngine(engineOptions);
+class BrowserSession implements Session {
+  readonly id: string;
+  readonly createdAt: Date;
+  readonly browserId: string;
+  lastUsed: Date;
+
+  constructor(
+    public context: BrowserContext,
+    browserId: string,
+  ) {
+    this.id = randomUUID();
+    this.createdAt = new Date();
+    this.browserId = browserId;
+    this.lastUsed = new Date();
   }
 
+  async close(): Promise<void> {
+    await this.context.close();
+  }
+}
+
+// ── ContextPool ────────────────────────────────────────────────────────────────
+// Manages one or more BrowserManagers, distributes contexts across them.
+// This is the CORE class — it pools CONTEXTS, not browsers.
+
+export class ContextPool {
+  private managers: BrowserManager[] = [];
+  private available: BrowserSession[] = [];
+  private active: Map<string, BrowserSession> = new Map(); // sessionId → session
+  private pending: Array<{
+    resolve: (s: BrowserSession) => void;
+    reject: (e: Error) => void;
+    createdAt: number;
+  }> = [];
+
+  private readonly maxContexts: number;
+  private readonly maxPerBrowser: number;
+  private readonly minWarm: number;
+  private readonly idleTimeout: number;
+  private readonly maxLifetime: number;
+
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(poolOptions: PoolOptions, private browserOptions: {
+    headless?: boolean;
+    args?: string[];
+    userAgent?: string;
+  } = {}) {
+    this.maxContexts = poolOptions.maxContexts;
+    this.maxPerBrowser = poolOptions.maxContextsPerBrowser ?? 20;
+    this.minWarm = poolOptions.minWarmContexts ?? Math.min(2, this.maxContexts);
+    this.idleTimeout = poolOptions.idleTimeoutMs ?? 60_000; // 1 min default
+    this.maxLifetime = poolOptions.maxLifetimeMs ?? 1_800_000; // 30 min default
+  }
+
+  // ── Lifecycle ────────────────────────────────────────────────────────────────
+
   async initialize(): Promise<void> {
-    await this.engine.launch();
-    const promises = Array.from({ length: this.options.minSessions }, () =>
-      this.engine.createSession().then(s => {
-        this.available.push(s);
-        this.active.set(s.id, s);
-      })
-    );
-    await Promise.all(promises);
+    // Pre-warm with minWarm contexts spread across managers
+    await this.ensureCapacity(this.minWarm);
     this.startCleanup();
   }
 
-  async acquire(): Promise<BrowserSession> {
-    const available = this.available.pop();
-    if (available && !available.isClosed) {
-      this.active.set(available.id, available);
-      return available;
+  async destroy(): Promise<void> {
+    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+    await Promise.allSettled([
+      ...this.available.map(s => s.close()),
+      ...Array.from(this.active.values()).map(s => s.close()),
+      ...this.managers.map(m => m.close()),
+    ]);
+    this.available = [];
+    this.active.clear();
+    this.managers = [];
+    this.pending = [];
+  }
+
+  // ── Acquire / Release ─────────────────────────────────────────────────────
+
+  async acquire(opts: SessionOptions = {}): Promise<BrowserSession> {
+    // 1. Warm session available
+    const warm = this.available.pop();
+    if (warm) {
+      warm.lastUsed = new Date();
+      this.active.set(warm.id, warm);
+      return warm;
     }
 
-    if (this.active.size < this.options.maxSessions) {
-      const session = await this.engine.createSession();
+    // 2. Under max — create new
+    if (this.active.size + this.available.length < this.maxContexts) {
+      const session = await this.createSession(opts);
       this.active.set(session.id, session);
       return session;
     }
 
+    // 3. At capacity — queue
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         const idx = this.pending.findIndex(p => p.resolve === resolve);
         if (idx !== -1) this.pending.splice(idx, 1);
-        reject(new PoolExhaustedError(this.options.maxSessions));
-      }, this.options.acquireTimeout);
+        reject(new Error(`Pool exhausted: ${this.maxContexts} contexts in use`));
+      }, 30_000);
 
       this.pending.push({ resolve, reject, createdAt: Date.now() });
     });
@@ -117,57 +230,111 @@ export class SessionPool {
   releaseById(sessionId: string): void {
     const session = this.active.get(sessionId);
     if (!session) return;
+    this.active.delete(sessionId);
 
-    if (this.available.length < this.options.minSessions) {
-      this.available.push(session);
-      this.active.delete(sessionId);
-      this.drainPending();
-    } else {
+    // If pool is oversized, close instead of return to warm
+    const total = this.active.size + this.available.length;
+    if (total > this.maxContexts) {
       session.close().catch(() => {});
-      this.active.delete(sessionId);
+      return;
     }
+
+    session.lastUsed = new Date();
+    this.available.push(session);
+    this.drainPending();
   }
+
+  getSession(sessionId: string): BrowserSession | undefined {
+    return this.active.get(sessionId);
+  }
+
+  private async createSession(opts: SessionOptions): Promise<BrowserSession> {
+    const manager = this.selectManager();
+    const context = await manager.createContext(opts);
+    return new BrowserSession(context, manager.id);
+  }
+
+  // ── Manager Selection ──────────────────────────────────────────────────────
+
+  private selectManager(): BrowserManager {
+    // Pick manager with most capacity (least loaded)
+    const withCapacity = this.managers.filter(m => m.hasCapacity);
+    if (withCapacity.length > 0) {
+      withCapacity.sort((a, b) => a.activeCount - b.activeCount);
+      return withCapacity[0]!;
+    }
+
+    // All full — create new manager if under global max
+    const totalContexts = this.managers.reduce((sum, m) => sum + m.activeCount, 0);
+    if (totalContexts < this.maxContexts) {
+      const mgr = new BrowserManager(this.browserOptions, this.maxPerBrowser);
+      this.managers.push(mgr);
+      return mgr;
+    }
+
+    // Truly at capacity — return least-loaded (will queue)
+    this.managers.sort((a, b) => a.activeCount - b.activeCount);
+    return this.managers[0]!;
+  }
+
+  private ensureCapacity(count: number): Promise<void> {
+    return Promise.all(
+      Array.from({ length: count }, () => this.createSession({}).then(s => this.available.push(s)))
+    ).then(() => {});
+  }
+
+  // ── Pending Queue Drain ─────────────────────────────────────────────────────
 
   private drainPending(): void {
     while (this.pending.length > 0 && this.available.length > 0) {
-      const pending = this.pending.shift();
-      if (!pending) break;
+      const p = this.pending.shift()!;
       const session = this.available.pop()!;
+      session.lastUsed = new Date();
       this.active.set(session.id, session);
-      pending.resolve(session);
+      p.resolve(session);
     }
   }
 
-  stats(): PoolStats {
-    return {
-      active: this.active.size,
-      available: this.available.length,
-      pending: this.pending.length,
-      total: this.options.maxSessions,
-    };
-  }
+  // ── Cleanup ────────────────────────────────────────────────────────────────
 
   private startCleanup(): void {
     this.cleanupTimer = setInterval(() => {
       const now = Date.now();
-      const toClose = this.available.filter(s => now - s.createdAt.getTime() > this.options.sessionTTL);
-      for (const session of toClose) {
-        session.close().catch(() => {});
-        this.available = this.available.filter(s => s.id !== session.id);
+
+      // Evict idle sessions over timeout
+      const idleEvict = this.available.filter(s => now - s.lastUsed.getTime() > this.idleTimeout);
+      for (const s of idleEvict) {
+        s.close().catch(() => {});
+        this.available = this.available.filter(x => x.id !== s.id);
       }
-    }, 60000);
+
+      // Evict oldest sessions over lifetime
+      const total = this.active.size + this.available.length;
+      if (total <= this.minWarm) return;
+
+      const excess = total - this.minWarm;
+      const byAge = [...this.available].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+      const toRemove = byAge.slice(0, excess);
+      for (const s of toRemove) {
+        s.close().catch(() => {});
+        this.available = this.available.filter(x => x.id !== s.id);
+      }
+    }, 30_000);
   }
 
-  async destroy(): Promise<void> {
-    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
-    const sessionsToClose = [
-      ...Array.from(this.active.values()),
-      ...this.available,
-    ];
-    await Promise.allSettled(sessionsToClose.map(s => s.close()));
-    this.active.clear();
-    this.available = [];
-    this.pending = [];
-    await this.engine.close();
+  // ── Stats ───────────────────────────────────────────────────────────────────
+
+  stats(): PoolStats {
+    return {
+      totalContexts: this.maxContexts,
+      activeContexts: this.active.size,
+      availableContexts: this.available.length,
+      pendingAcquires: this.pending.length,
+      browsers: this.managers.length,
+      maxContexts: this.maxContexts,
+    };
   }
 }
+
+// Alias for backwards compat
+export { ContextPool as SessionPool };

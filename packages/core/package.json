@@ -18,7 +18,7 @@
     "preinstall": "npx playwright install chromium --with-deps 2>/dev/null || true"
   },
   "dependencies": {
-    "playwright": "^1.48.0"
+    "playwright": "^1.62.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

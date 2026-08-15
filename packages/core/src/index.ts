@@ -1,21 +1,9 @@
-// BlackApple Agentic Browser — Public Exports
-export { BrowserEngine, SessionPool } from './pool.js';
+// BlackApple Agentic Browser — Core Exports
+export { ContextPool } from './pool.js';
 export { BrowserSession } from './session.js';
+export { PoolExhaustedError } from './types.js';
 export type {
-  BrowserLaunchOptions,
-  SessionOptions,
-  PageMetrics,
-  NavigateOptions,
-  ClickOptions,
-  TypeOptions,
-  EvaluateOptions,
-  SessionInfo,
-  PoolStats,
   PoolOptions,
-} from './types.js';
-export {
-  BlackAppleError,
-  SessionNotFoundError,
-  PoolExhaustedError,
-  TimeoutError,
+  PoolStats,
+  SessionOptions,
 } from './types.js';

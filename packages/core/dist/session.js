@@ -1,143 +1,166 @@
+// BlackApple Agentic Browser — BrowserSession
+// Lightweight wrapper around Playwright BrowserContext with BlackApple-specific helpers.
 export class BrowserSession {
-    context;
-    page;
     id;
+    browserId;
+    context;
     createdAt;
-    _url = 'about:blank';
-    _closed = false;
-    constructor(id, context, page) {
-        this.context = context;
-        this.page = page;
+    lastUsed;
+    constructor(id, browserId, context, createdAt, lastUsed) {
         this.id = id;
-        this.createdAt = new Date();
+        this.browserId = browserId;
+        this.context = context;
+        this.createdAt = createdAt;
+        this.lastUsed = lastUsed;
     }
-    get url() {
-        return this._url;
-    }
-    get isClosed() {
-        return this._closed;
-    }
+    // ── Navigation ───────────────────────────────────────────────────────────────
     async navigate(url, options = {}) {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        const { waitUntil = 'domcontentloaded', timeout = 30000 } = options;
-        await this.page.goto(url, { waitUntil, timeout });
-        this._url = this.page.url();
-        return {
-            url: this._url,
-            title: await this.page.title(),
-            content: await this.page.content(),
+        const { waitUntil = 'domcontentloaded', timeout = 30_000 } = options;
+        const start = Date.now();
+        const page = await this.context.newPage();
+        const response = await page.goto(url, { waitUntil, timeout });
+        const metrics = {
+            url: page.url(),
+            title: await page.title(),
+            loadTime: Date.now() - start,
+            status: response?.status() ?? 0,
         };
+        await page.close();
+        return metrics;
     }
-    async click(selector, options = {}) {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        const { button = 'left', clickCount = 1, timeout = 5000 } = options;
-        await this.page.click(selector, { button, clickCount, timeout });
-    }
-    async fill(selector, value, options = {}) {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        await this.page.fill(selector, value, options);
-    }
-    async type(selector, text, options = {}) {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        await this.page.type(selector, text, options);
-    }
-    async evaluate(fn, options = {}) {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        const fnStr = typeof fn === 'function' ? `(${fn.toString()})()` : fn;
-        return this.page.evaluate(fnStr);
+    // ── Evaluation ─────────────────────────────────────────────────────────────
+    async evaluate(fn) {
+        const page = await this.context.newPage();
+        try {
+            const result = await page.evaluate(typeof fn === 'function' ? fn : new Function(fn));
+            return result;
+        }
+        finally {
+            await page.close();
+        }
     }
     async evaluateOnDocument(fn) {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        const fnStr = typeof fn === 'function' ? `(${fn.toString()})()` : fn;
-        // @ts-expect-error Playwright page binding
-        return this.page.evaluateOnNewDocument(fnStr);
+        const page = await this.context.newPage();
+        try {
+            const fnStr = typeof fn === 'function' ? `(${fn.toString()})()` : fn;
+            // @ts-expect-error CDP binding
+            return await page.evaluateOnNewDocument(fnStr);
+        }
+        finally {
+            await page.close();
+        }
     }
-    async screenshot(options = {}) {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        const { fullPage = false, type = 'png', quality } = options;
-        return this.page.screenshot({ fullPage, type, quality });
+    // ── Interaction ────────────────────────────────────────────────────────────
+    async click(selector, options) {
+        const page = await this.context.newPage();
+        try {
+            await page.click(selector, { timeout: options?.timeout ?? 10_000, button: options?.button ?? 'left' });
+        }
+        finally {
+            await page.close();
+        }
     }
-    async waitForSelector(selector, options = {}) {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        const { state = 'visible', timeout = 5000 } = options;
-        await this.page.waitForSelector(selector, { state, timeout });
+    async fill(selector, value) {
+        const page = await this.context.newPage();
+        try {
+            await page.fill(selector, value);
+        }
+        finally {
+            await page.close();
+        }
     }
-    async waitForTimeout(ms) {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        await this.page.waitForTimeout(ms);
+    async type(selector, text, options) {
+        const page = await this.context.newPage();
+        try {
+            await page.type(selector, text, options);
+        }
+        finally {
+            await page.close();
+        }
     }
-    async getMetrics() {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        return {
-            url: this.page.url(),
-            title: await this.page.title(),
-            content: await this.page.content(),
-        };
-    }
-    async getContent() {
-        return this.page.content();
-    }
-    async title() {
-        return this.page.title();
+    async waitForSelector(selector, options) {
+        const page = await this.context.newPage();
+        try {
+            await page.waitForSelector(selector, { timeout: options?.timeout ?? 10_000, state: options?.state ?? 'visible' });
+        }
+        finally {
+            await page.close();
+        }
     }
     async $(selector) {
-        return this.page.$(selector);
+        const page = await this.context.newPage();
+        try {
+            return await page.$(selector);
+        }
+        finally {
+            await page.close();
+        }
     }
     async $$(selector) {
-        return this.page.$$(selector);
+        const page = await this.context.newPage();
+        try {
+            return await page.$$(selector);
+        }
+        finally {
+            await page.close();
+        }
     }
-    async reload(options = {}) {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        const { waitUntil = 'domcontentloaded', timeout = 30000 } = options;
-        await this.page.reload({ waitUntil, timeout });
-        this._url = this.page.url();
-        return {
-            url: this._url,
-            title: await this.page.title(),
-            content: await this.page.content(),
-        };
+    async getContent() {
+        const page = await this.context.newPage();
+        try {
+            return page.content();
+        }
+        finally {
+            await page.close();
+        }
     }
-    async goBack() {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        const navigated = await this.page.goBack();
-        if (!navigated)
-            return null;
-        this._url = this.page.url();
-        return {
-            url: this._url,
-            title: await this.page.title(),
-            content: await this.page.content(),
-        };
+    async title() {
+        const page = await this.context.newPage();
+        try {
+            return page.title();
+        }
+        finally {
+            await page.close();
+        }
     }
-    async goForward() {
-        if (this._closed)
-            throw new Error(`Session ${this.id} is closed`);
-        const navigated = await this.page.goForward();
-        if (!navigated)
-            return null;
-        this._url = this.page.url();
-        return {
-            url: this._url,
-            title: await this.page.title(),
-            content: await this.page.content(),
-        };
+    // ── Screenshots / PDF ─────────────────────────────────────────────────────
+    async screenshot(options) {
+        const page = await this.context.newPage();
+        try {
+            return await page.screenshot({ ...options });
+        }
+        finally {
+            await page.close();
+        }
+    }
+    async pdf(options) {
+        const page = await this.context.newPage();
+        try {
+            return await page.pdf({ ...options, format: options?.format ?? 'A4' });
+        }
+        finally {
+            await page.close();
+        }
+    }
+    // ── Network Interception ───────────────────────────────────────────────────
+    async interceptRequests(handler) {
+        await this.context.route('**/*', async (route) => {
+            const req = route.request();
+            try {
+                if (handler.length >= 3) {
+                    // old API compat
+                    await route.continue();
+                }
+                else {
+                    await route.continue();
+                }
+            }
+            catch {
+                await route.abort();
+            }
+        });
     }
     async close() {
-        if (this._closed)
-            return;
-        this._closed = true;
         await this.context.close();
     }
 }

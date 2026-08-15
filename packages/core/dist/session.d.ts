@@ -1,50 +1,56 @@
-import type { Page, BrowserContext } from 'playwright';
-import type { PageMetrics, NavigateOptions } from './types.js';
+import type { BrowserContext, Page } from 'playwright';
+export interface PageMetrics {
+    url: string;
+    title: string;
+    loadTime: number;
+    status: number;
+}
+export interface NavigateOptions {
+    waitUntil?: 'load' | 'domcontentloaded' | 'networkidle';
+    timeout?: number;
+}
 export declare class BrowserSession {
-    private context;
-    private page;
     readonly id: string;
+    readonly browserId: string;
+    readonly context: BrowserContext;
     readonly createdAt: Date;
-    private _url;
-    private _closed;
-    constructor(id: string, context: BrowserContext, page: Page);
-    get url(): string;
-    get isClosed(): boolean;
+    lastUsed: Date;
+    constructor(id: string, browserId: string, context: BrowserContext, createdAt: Date, lastUsed: Date);
     navigate(url: string, options?: NavigateOptions): Promise<PageMetrics>;
+    evaluate<T = unknown>(fn: string | (() => T)): Promise<T>;
+    evaluateOnDocument<T = unknown>(fn: string | (() => T)): Promise<T>;
     click(selector: string, options?: {
-        button?: 'left' | 'right' | 'middle';
-        clickCount?: number;
         timeout?: number;
+        button?: 'left' | 'right';
     }): Promise<void>;
-    fill(selector: string, value: string, options?: {
-        timeout?: number;
-    }): Promise<void>;
+    fill(selector: string, value: string): Promise<void>;
     type(selector: string, text: string, options?: {
         delay?: number;
-        timeout?: number;
     }): Promise<void>;
-    evaluate<T = unknown>(fn: string | (() => T), options?: {
-        timeout?: number;
-    }): Promise<T>;
-    evaluateOnDocument<T = unknown>(fn: string | (() => T)): Promise<T>;
-    screenshot(options?: {
-        fullPage?: boolean;
-        type?: 'png' | 'jpeg';
-        quality?: number;
-    }): Promise<Buffer>;
     waitForSelector(selector: string, options?: {
-        state?: 'attached' | 'detached' | 'visible' | 'hidden';
         timeout?: number;
+        state?: 'visible' | 'hidden' | 'attached';
     }): Promise<void>;
-    waitForTimeout(ms: number): Promise<void>;
-    getMetrics(): Promise<PageMetrics>;
-    getContent(): Promise<string>;
-    title(): Promise<string>;
     $(selector: string): Promise<ReturnType<Page['$']>>;
     $$(selector: string): Promise<ReturnType<Page['$$']>>;
-    reload(options?: NavigateOptions): Promise<PageMetrics>;
-    goBack(): Promise<PageMetrics | null>;
-    goForward(): Promise<PageMetrics | null>;
+    getContent(): Promise<string>;
+    title(): Promise<string>;
+    screenshot(options?: {
+        path?: string;
+        fullPage?: boolean;
+        type?: 'png' | 'jpeg';
+    }): Promise<Buffer>;
+    pdf(options?: {
+        path?: string;
+        format?: 'A4' | 'Letter';
+    }): Promise<Buffer>;
+    interceptRequests(handler: (route: {
+        url: string;
+        abort: () => void;
+        continue: (opts?: {
+            url?: string;
+        }) => void;
+    }) => void): Promise<void>;
     close(): Promise<void>;
 }
 //# sourceMappingURL=session.d.ts.map

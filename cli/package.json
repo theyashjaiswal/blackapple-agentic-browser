@@ -9,6 +9,6 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "@blackapple/agentic-browser-sdk": "workspace:*"
+    "@blackapple/agentic-browser-sdk": "*"
   }
 }

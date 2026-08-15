@@ -1,29 +1,84 @@
-import type { BrowserLaunchOptions, SessionOptions, PoolOptions, PoolStats } from './types.js';
-import { BrowserSession } from './session.js';
-export declare class BrowserEngine {
-    private browser;
-    private launched;
-    private options;
-    constructor(options?: BrowserLaunchOptions);
-    launch(): Promise<void>;
-    createSession(sessionOptions?: SessionOptions): Promise<BrowserSession>;
-    close(): Promise<void>;
-    isLaunched(): boolean;
+import { type BrowserContext } from 'playwright';
+export interface SessionOptions {
+    viewport?: {
+        width: number;
+        height: number;
+    };
+    userAgent?: string;
+    javaScriptEnabled?: boolean;
+    ignoreHTTPSErrors?: boolean;
 }
-export declare class SessionPool {
-    private engine;
+export interface PoolOptions {
+    /** Max concurrent contexts across ALL browsers */
+    maxContexts: number;
+    /** Max contexts per single Chromium process */
+    maxContextsPerBrowser?: number;
+    /** Min warm contexts to keep ready */
+    minWarmContexts?: number;
+    /** Kill context after N ms of inactivity */
+    idleTimeoutMs?: number;
+    /** Kill context after N ms since creation */
+    maxLifetimeMs?: number;
+    /** Kill context if browser process uses > N MB */
+    maxContextMemoryMB?: number;
+    /** Ram budget per node in MB (auto-calculates maxContexts if not set) */
+    ramBudgetMB?: number;
+}
+export interface Session {
+    readonly id: string;
+    readonly createdAt: Date;
+    context: BrowserContext;
+    browserId: string;
+    lastUsed: Date;
+    close(): Promise<void>;
+}
+export interface PoolStats {
+    totalContexts: number;
+    activeContexts: number;
+    availableContexts: number;
+    pendingAcquires: number;
+    browsers: number;
+    maxContexts: number;
+    memoryUsageMB?: number;
+}
+declare class BrowserSession implements Session {
+    context: BrowserContext;
+    readonly id: string;
+    readonly createdAt: Date;
+    readonly browserId: string;
+    lastUsed: Date;
+    constructor(context: BrowserContext, browserId: string);
+    close(): Promise<void>;
+}
+export declare class ContextPool {
+    private browserOptions;
+    private managers;
     private available;
     private active;
     private pending;
-    private options;
+    private readonly maxContexts;
+    private readonly maxPerBrowser;
+    private readonly minWarm;
+    private readonly idleTimeout;
+    private readonly maxLifetime;
     private cleanupTimer;
-    constructor(options: PoolOptions, engineOptions?: BrowserLaunchOptions);
+    constructor(poolOptions: PoolOptions, browserOptions?: {
+        headless?: boolean;
+        args?: string[];
+        userAgent?: string;
+    });
     initialize(): Promise<void>;
-    acquire(): Promise<BrowserSession>;
-    release(session: BrowserSession): void;
-    private drainPending;
-    stats(): PoolStats;
-    private startCleanup;
     destroy(): Promise<void>;
+    acquire(opts?: SessionOptions): Promise<BrowserSession>;
+    release(session: BrowserSession): void;
+    releaseById(sessionId: string): void;
+    getSession(sessionId: string): BrowserSession | undefined;
+    private createSession;
+    private selectManager;
+    private ensureCapacity;
+    private drainPending;
+    private startCleanup;
+    stats(): PoolStats;
 }
+export { ContextPool as SessionPool };
 //# sourceMappingURL=pool.d.ts.map
