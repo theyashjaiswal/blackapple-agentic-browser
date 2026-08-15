@@ -85,10 +85,11 @@ app.post('/v1/sessions/:id/navigate', async (req, res) => {
   const { id } = req.params;
   const session = pool.getSession(id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
-  const { url, waitUntil = 'domcontentloaded', timeout = 30_000 } = req.body;
-  if (!url) return res.status(400).json({ error: 'url required' });
+  const { url: bodyUrl, waitUntil = 'domcontentloaded', timeout = 30_000 } = req.body;
+  const url = bodyUrl ?? (req.query.url as string | undefined);
+  if (!url) return res.status(400).json({ error: 'url required (body or query param)' });
   try {
-    const result = await session.navigate(url, { waitUntil, timeout });
+    const result = await session.navigate(url, { waitUntil, timeout: Number(timeout) });
     res.json(result);
   } catch (err: unknown) {
     res.status(500).json({ error: (err as Error).message });

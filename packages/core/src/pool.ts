@@ -196,13 +196,30 @@ export class ContextPool {
 
   // ── Acquire / Release ─────────────────────────────────────────────────────
 
+  private async isContextAlive(session: BrowserSession): Promise<boolean> {
+    try {
+      const page = await session.context.newPage();
+      await page.close().catch(() => {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async acquire(opts: SessionOptions = {}): Promise<PooledSession> {
-    // 1. Warm session available — close its persistent pages to ensure fresh start.
-  // Do NOT close the context — it's managed by the pool.
+    // 1. Warm session available — reset its page state directly (sync, no async).
+    // Do NOT close pages async (race with ongoing operations) and do NOT close
+    // the context (context belongs to the pool, not the session).
     const warm = this.available.pop();
     if (warm) {
-      // Only close the pages, not the context (context belongs to the pool)
-      await warm.resetPages();
+      // Validate the context is still alive — if browser crashed, discard and retry
+      const alive = await this.isContextAlive(warm);
+      if (!alive) {
+        warm.close().catch(() => {});
+        return this.acquire(opts); // retry with next warm or new session
+      }
+      warm._pages = [];
+      warm._activeIndex = 0;
       this.active.set(warm.id, warm);
       return warm;
     }
@@ -210,6 +227,12 @@ export class ContextPool {
     // 2. Under max — create new
     if (this.active.size + this.available.length < this.maxContexts) {
       const session = await this.createSession(opts);
+      // Validate new context is alive
+      const alive = await this.isContextAlive(session);
+      if (!alive) {
+        session.close().catch(() => {});
+        throw new Error('Failed to create browser context — browser may have crashed');
+      }
       this.active.set(session.id, session);
       return session;
     }

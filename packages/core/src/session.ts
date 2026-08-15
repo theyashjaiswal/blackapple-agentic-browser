@@ -18,8 +18,11 @@ export interface NavigateOptions {
 }
 
 export class BrowserSession {
-  private _pages: Page[] = [];
-  private _activeIndex = 0;
+  // Multi-page array: pages are always at their index (no null-marking on close).
+  // When a page is closed via closePage(), it's spliced out and activeIndex is clamped.
+  // Public so PooledSession can reset them directly on reacquire (no async page-close).
+  public _pages: Page[] = [];
+  public _activeIndex = 0;
 
   constructor(
     public readonly id: string,
@@ -29,7 +32,7 @@ export class BrowserSession {
     public lastUsed: Date,
   ) {}
 
-  // ── Page Management ─────────────────────────────────────────────────────
+  // ── Page Access ─────────────────────────────────────────────────────────
 
   private activePage(): Page {
     const page = this._pages[this._activeIndex];
@@ -40,6 +43,7 @@ export class BrowserSession {
   }
 
   private getPage(index: number): Page | null {
+    if (index < 0 || index >= this._pages.length) return null;
     const page = this._pages[index];
     if (!page || page.isClosed()) return null;
     return page;
@@ -47,8 +51,13 @@ export class BrowserSession {
 
   /** Switch to a specific page by index. */
   async switchPage(index: number): Promise<void> {
-    const page = this.getPage(index);
-    if (!page) throw new Error(`Page index ${index} is not available`);
+    if (index < 0 || index >= this._pages.length) {
+      throw new RangeError(`Page index ${index} is out of range (${this._pages.length} open pages)`);
+    }
+    const page = this._pages[index];
+    if (!page || page.isClosed()) {
+      throw new Error(`Page at index ${index} has been closed`);
+    }
     this._activeIndex = index;
     this.lastUsed = new Date();
   }
@@ -58,6 +67,17 @@ export class BrowserSession {
     return this._pages.filter(p => !p.isClosed()).length;
   }
 
+  /** Create a new page on the session's context. Used by pool health checks. */
+  async createPage(): Promise<Page | null> {
+    try {
+      const page = await this.context.newPage();
+      this._pages.push(page);
+      return page;
+    } catch {
+      return null;
+    }
+  }
+
   /** URLs of all open pages. */
   pageUrls(): string[] {
     return this._pages.filter(p => !p.isClosed()).map(p => p.url());
@@ -65,15 +85,22 @@ export class BrowserSession {
 
   // ── Navigation ─────────────────────────────────────────────────────────
 
-  /** Navigate active page to URL. Creates a page if none exist. */
+  /** Navigate active page to URL. Creates a page if none exist.
+   *  CRITICAL: after closePage(), _pages shrinks but _activeIndex still points to
+   *  a valid index. navigate() uses the active page directly, NOT getPage(index).
+   *  This correctly handles the "switch then navigate" pattern: switchPage(0) then
+   *  navigate('...') always navigates tab 0 even if closePage(1) happened before. */
   async navigate(url: string, options: NavigateOptions = {}): Promise<PageMetrics> {
     const { waitUntil = 'domcontentloaded', timeout = 30_000 } = options;
     const start = Date.now();
-    let page = this.getPage(this._activeIndex);
-    if (!page) {
+    // Use _pages[_activeIndex] directly — if closePage removed the page at this
+    // index, _activeIndex was already clamped and the slot is gone from the array.
+    // In that case _pages[_activeIndex] is the NEXT valid page or undefined.
+    let page = this._pages[this._activeIndex];
+    if (!page || page.isClosed()) {
+      // No page at active index — create a new one at this exact index
       page = await this.context.newPage();
-      this._pages.push(page);
-      this._activeIndex = this._pages.length - 1;
+      this._pages[this._activeIndex] = page;
     }
     const response = await page.goto(url, { waitUntil, timeout });
     this.lastUsed = new Date();
@@ -85,7 +112,7 @@ export class BrowserSession {
     };
   }
 
-  // ── Multi-Tab ──────────────────────────────────────────────────────────
+  // ── Multi-Tab ─────────────────────────────────────────────────────────
 
   /** Create a new blank page/tab. Returns its index. */
   async newPage(): Promise<number> {
@@ -113,15 +140,12 @@ export class BrowserSession {
   async closePage(index?: number): Promise<void> {
     const targetIndex = index ?? this._activeIndex;
     const page = this.getPage(targetIndex);
-    if (!page) return;
+    if (!page) throw new Error(`No page at index ${targetIndex} to close`);
     await page.close();
-    // Remove from array (not null-mark)
     this._pages.splice(targetIndex, 1);
-    // Adjust active index if needed
     if (this._pages.length === 0) {
       this._activeIndex = 0;
     } else if (index === undefined || targetIndex <= this._activeIndex) {
-      // Closed active or before active — clamp
       this._activeIndex = Math.min(this._activeIndex, this._pages.length - 1);
     }
   }
@@ -129,45 +153,39 @@ export class BrowserSession {
   /** Close all pages except the active one. */
   async closeOtherPages(): Promise<void> {
     const active = this.activePage();
-    const activeIdx = this._pages.indexOf(active);
     const toClose = this._pages.filter(p => p !== active && !p.isClosed());
     await Promise.all(toClose.map(p => p.close()));
     this._pages = [active];
     this._activeIndex = 0;
   }
 
-  // ── Evaluation ──────────────────────────────────────────────────────────
+  // ── Evaluation ─────────────────────────────────────────────────────────
 
   /** Evaluate JS on the active page. */
   async evaluate<T = unknown>(fn: string | (() => T)): Promise<T> {
     const page = this.activePage();
     this.lastUsed = new Date();
-    let fnStr: string;
-    if (typeof fn === 'function') {
-      // Convert function to body string and call it immediately
-      fnStr = `(${fn.toString()})()`;
-    } else if (fn.includes('=>')) {
-      // String contains arrow function — wrap in parens and call
-      fnStr = `(${fn})()`;
-    } else {
-      // Plain expression string — return it directly
-      fnStr = fn;
-    }
-    // eslint-disable-next-line no-new-func
-    return page.evaluate(new Function(`return (${fnStr})`) as () => T) as Promise<T>;
+    return this._eval(page, fn);
   }
 
   /** Evaluate JS on a specific page by index. */
   async evaluateOn<T = unknown>(fn: string | (() => T), pageIndex: number): Promise<T> {
     const page = this.getPage(pageIndex);
-    if (!page) throw new Error(`Page index ${pageIndex} is not available`);
+    if (!page) throw new Error(`No page at index ${pageIndex} — pages: ${this._pages.length}`);
     this.lastUsed = new Date();
+    return this._eval(page, fn);
+  }
+
+  /** Shared eval logic: handles Function, arrow-string, and plain expression. */
+  private async _eval<T>(page: Page, fn: string | (() => T)): Promise<T> {
     let fnStr: string;
     if (typeof fn === 'function') {
       fnStr = `(${fn.toString()})()`;
-    } else if (fn.includes('=>')) {
+    } else if (/=>/.test(fn)) {
+      // Arrow function string like `() => 42` or `(x) => x + 1`
       fnStr = `(${fn})()`;
     } else {
+      // Plain expression
       fnStr = fn;
     }
     // eslint-disable-next-line no-new-func
@@ -183,7 +201,7 @@ export class BrowserSession {
     return page.evaluateOnNewDocument(fnStr) as Promise<T>;
   }
 
-  // ── Interaction ──────────────────────────────────────────────────────────
+  // ── Interaction ─────────────────────────────────────────────────────────
 
   async click(selector: string, options?: { timeout?: number; button?: 'left' | 'right' }): Promise<void> {
     const page = this.activePage();
@@ -231,8 +249,10 @@ export class BrowserSession {
   // ── Screenshots / PDF ──────────────────────────────────────────────────
 
   async screenshot(options?: { pageIndex?: number; path?: string; fullPage?: boolean; type?: 'png' | 'jpeg' }): Promise<Buffer> {
-    const page = options?.pageIndex !== undefined ? this.getPage(options.pageIndex) : this.getPage(this._activeIndex);
-    if (!page) throw new Error('No such page');
+    const page = options?.pageIndex !== undefined
+      ? this.getPage(options.pageIndex)
+      : this.activePage();
+    if (!page) throw new Error(`No page at index ${options?.pageIndex ?? this._activeIndex}`);
     this.lastUsed = new Date();
     const { pageIndex: _, ...rest } = options ?? {};
     return page.screenshot({ ...rest }) as Promise<Buffer>;

@@ -65,6 +65,7 @@ export declare class ContextPool {
     });
     initialize(): Promise<void>;
     destroy(): Promise<void>;
+    private isContextAlive;
     acquire(opts?: SessionOptions): Promise<PooledSession>;
     release(session: PooledSession): void;
     releaseById(sessionId: string): void;

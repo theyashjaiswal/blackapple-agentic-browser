@@ -114,11 +114,13 @@ describe('BrowserSession — multi-tab workflows', () => {
   it('opens a new tab and it is accessible', async () => {
     await session.navigate('https://example.com');
     const mainUrl = await session.evaluate<string>('window.location.href');
+    // openTab(switchTo=true) makes the new tab active — switch back to tab 0
     const tabIndex = await session.openTab('https://httpbin.org/html');
     expect(tabIndex).toBe(1);
     const tabUrl = await session.evaluateOn<string>('window.location.href', tabIndex);
     expect(tabUrl).toContain('httpbin.org');
-    // Main page still on original URL
+    // Switch back to tab 0 and verify it's still on example.com
+    await session.switchPage(0);
     const backUrl = await session.evaluate<string>('window.location.href');
     expect(backUrl).toBe(mainUrl);
   });
@@ -228,7 +230,7 @@ describe('BrowserSession — multi-tab workflows', () => {
     await session.navigate('https://example.com');
     await session.openTab('https://httpbin.org/html', false);
     await session.closePage(1);
-    await expect(session.evaluateOn('document.title', 1)).rejects.toThrow('closed');
+    await expect(session.evaluateOn('document.title', 1)).rejects.toThrow('not available');
   });
 });
 
@@ -254,17 +256,27 @@ describe('BrowserSession — auth & cookie persistence', () => {
     expect(token).toBe('abc-123');
   });
 
-  it('localStorage persists across tabs in same session', async () => {
+  it('localStorage persists across tabs in same session (shared within context)', async () => {
+    // localStorage is shared across tabs within the SAME origin/context.
+    // This tests that behavior: setting in tab 0 is visible in tab 1.
     await session.navigate('https://example.com');
-    await session.evaluate(() => localStorage.setItem('session', 'tab1-data'));
+    await session.evaluate(() => localStorage.setItem('session', 'main-tab'));
     const tabIdx = await session.openTab('https://example.com', true);
-    // Set different value in tab 2
-    await session.evaluate(() => localStorage.setItem('session', 'tab2-data'));
-    // Tab 1 should still have its own value
-    const tab1Value = await session.evaluateOn<string>('localStorage.getItem("session")', 0);
-    const tab2Value = await session.evaluateOn<string>('localStorage.getItem("session")', tabIdx);
-    expect(tab1Value).toBe('tab1-data');
-    expect(tab2Value).toBe('tab2-data');
+    // Tab 1 inherits the same localStorage from the shared context
+    const tabValue = await session.evaluate<string>('localStorage.getItem("session")');
+    expect(tabValue).toBe('main-tab');
+  });
+
+  it('localStorage is isolated between DIFFERENT sessions (different contexts)', async () => {
+    // Isolation between sessions = different contexts = different localStorage partitions
+    const [s1, s2] = await Promise.all([pool.acquire(), pool.acquire()]);
+    await s1.navigate('https://example.com');
+    await s2.navigate('https://example.com');
+    await s1.evaluate(() => localStorage.setItem('token', 's1-secret'));
+    const s2token = await s2.evaluate<string>('localStorage.getItem("token")');
+    expect(s2token).toBeNull(); // s2's separate context has no s1's token
+    pool.release(s1);
+    pool.release(s2);
   });
 
   it('cookies set in one tab are visible in another tab', async () => {
@@ -306,13 +318,13 @@ describe('BrowserSession — pool isolation', () => {
     pool.release(s2);
   });
 
-  it('two sessions have isolated localStorage', async () => {
+  it('two sessions have isolated cookies', async () => {
     const [s1, s2] = await Promise.all([pool.acquire(), pool.acquire()]);
     await s1.navigate('https://example.com');
     await s2.navigate('https://example.com');
-    await s1.evaluate(() => localStorage.setItem('token', 's1-secret'));
-    const s2token = await s2.evaluate<string>('localStorage.getItem("token")');
-    expect(s2token).toBeNull();
+    await s1.evaluate(() => { document.cookie = 's1only=secret'; });
+    const s2cookie = await s2.evaluate<string>('document.cookie');
+    expect(s2cookie).not.toContain('s1only');
     pool.release(s1);
     pool.release(s2);
   });
