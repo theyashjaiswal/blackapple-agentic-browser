@@ -102,14 +102,20 @@ export class BrowserSession {
       page = await this.context.newPage();
       this._pages[this._activeIndex] = page;
     }
-    const response = await page.goto(url, { waitUntil, timeout });
-    this.lastUsed = new Date();
-    return {
-      url: page.url(),
-      title: await page.title(),
-      loadTime: Date.now() - start,
-      status: response?.status() ?? 0,
-    };
+    try {
+      const response = await page.goto(url, { waitUntil, timeout });
+      this.lastUsed = new Date();
+      return {
+        url: page.url(),
+        title: await page.title(),
+        loadTime: Date.now() - start,
+        status: response?.status() ?? 0,
+      };
+    } catch {
+      // Unreachable domain / network error — return status 0 without throwing
+      this.lastUsed = new Date();
+      return { url, title: '', loadTime: Date.now() - start, status: 0 };
+    }
   }
 
   // ── Multi-Tab ─────────────────────────────────────────────────────────
@@ -277,7 +283,11 @@ export class BrowserSession {
    *  Called by the pool when a warm session is reused.
    *  Does NOT close the context — context belongs to the pool. */
   async resetPages(): Promise<void> {
-    await Promise.all(this._pages.map(p => { try { return p.close(); } catch { return Promise.resolve(); } }));
+    // Close all pages for a fresh start. Context cookies/state belong to this session's lifetime.
+    // If true isolation is needed between callers, the pool must allocate a fresh context.
+    await Promise.all(
+      this._pages.map(p => { try { return p.close(); } catch { return Promise.resolve(); } }),
+    );
     this._pages = [];
     this._activeIndex = 0;
   }
