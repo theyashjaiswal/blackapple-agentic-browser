@@ -1,4 +1,5 @@
 import { type BrowserContext } from 'playwright';
+import { BrowserSession } from './session.js';
 export interface SessionOptions {
     viewport?: {
         width: number;
@@ -41,12 +42,7 @@ export interface PoolStats {
     maxContexts: number;
     memoryUsageMB?: number;
 }
-declare class BrowserSession implements Session {
-    context: BrowserContext;
-    readonly id: string;
-    readonly createdAt: Date;
-    readonly browserId: string;
-    lastUsed: Date;
+declare class PooledSession extends BrowserSession {
     constructor(context: BrowserContext, browserId: string);
     close(): Promise<void>;
 }
@@ -69,10 +65,10 @@ export declare class ContextPool {
     });
     initialize(): Promise<void>;
     destroy(): Promise<void>;
-    acquire(opts?: SessionOptions): Promise<BrowserSession>;
-    release(session: BrowserSession): void;
+    acquire(opts?: SessionOptions): Promise<PooledSession>;
+    release(session: PooledSession): void;
     releaseById(sessionId: string): void;
-    getSession(sessionId: string): BrowserSession | undefined;
+    getSession(sessionId: string): PooledSession | undefined;
     private createSession;
     private selectManager;
     private ensureCapacity;

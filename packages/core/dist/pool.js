@@ -6,6 +6,7 @@
 // Context pooling is 10x more memory efficient.
 import { randomUUID } from 'crypto';
 import { chromium } from 'playwright';
+import { BrowserSession } from './session.js';
 // ── BrowserManager ────────────────────────────────────────────────────────────
 // Owns ONE Chromium process and manages contexts within it.
 class BrowserManager {
@@ -62,19 +63,16 @@ class BrowserManager {
         this.contexts.clear();
     }
 }
-// ── Session ───────────────────────────────────────────────────────────────────
-class BrowserSession {
-    context;
-    id;
-    createdAt;
-    browserId;
-    lastUsed;
+// ── PooledSession ──────────────────────────────────────────────────────────────
+// PooledSession extends BrowserSession so callers get full browser API.
+// Named PooledSession to avoid shadowing the exported BrowserSession class.
+class PooledSession extends BrowserSession {
     constructor(context, browserId) {
-        this.context = context;
-        this.id = randomUUID();
-        this.createdAt = new Date();
-        this.browserId = browserId;
-        this.lastUsed = new Date();
+        super(randomUUID(), // id
+        browserId, // browserId
+        context, // context
+        new Date(), // createdAt
+        new Date());
     }
     async close() {
         await this.context.close();
@@ -124,10 +122,12 @@ export class ContextPool {
     }
     // ── Acquire / Release ─────────────────────────────────────────────────────
     async acquire(opts = {}) {
-        // 1. Warm session available
+        // 1. Warm session available — close its persistent pages to ensure fresh start.
+        // Do NOT close the context — it's managed by the pool.
         const warm = this.available.pop();
         if (warm) {
-            warm.lastUsed = new Date();
+            // Only close the pages, not the context (context belongs to the pool)
+            await warm.resetPages();
             this.active.set(warm.id, warm);
             return warm;
         }
@@ -172,7 +172,7 @@ export class ContextPool {
     async createSession(opts) {
         const manager = this.selectManager();
         const context = await manager.createContext(opts);
-        return new BrowserSession(context, manager.id);
+        return new PooledSession(context, manager.id);
     }
     // ── Manager Selection ──────────────────────────────────────────────────────
     selectManager() {

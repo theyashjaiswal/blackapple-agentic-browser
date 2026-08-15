@@ -1,115 +1,375 @@
-// BlackApple Agentic Browser — Core Tests
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from '@jest/globals';
-import { BrowserEngine, BrowserSession } from '../src/session.js';
-import type { BrowserLaunchOptions, SessionOptions } from '../src/types.js';
+// BlackApple Agentic Browser — Multi-Tab & Session Tests
+// Tests: multi-tab workflows, page management, auth/cookie persistence, full session lifecycle.
 
-describe('BrowserSession', () => {
-  let engine: BrowserEngine;
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from '@jest/globals';
+import { ContextPool } from '../src/pool.js';
+import type { PoolOptions } from '../src/pool.js';
+import { BrowserSession } from '../src/session.js';
+
+const POOL_OPTS: PoolOptions = {
+  maxContexts: 4,
+  maxContextsPerBrowser: 4,
+  minWarmContexts: 0,
+};
+const BROWSER_OPTS = { headless: true };
+
+// ── Basic Lifecycle ─────────────────────────────────────────────────────────
+
+describe('BrowserSession — basic lifecycle', () => {
+  let pool: ContextPool;
   let session: BrowserSession;
 
   beforeAll(async () => {
-    engine = new BrowserEngine({ headless: true });
-    await engine.launch();
+    pool = new ContextPool(POOL_OPTS, BROWSER_OPTS);
+    await pool.initialize();
+  });
+  afterAll(async () => { await pool.destroy(); });
+  beforeEach(async () => { session = await pool.acquire(); });
+  afterEach(async () => { pool.release(session); });
+
+  it('navigates and returns correct metrics', async () => {
+    const r = await session.navigate('https://example.com');
+    expect(r.status).toBe(200);
+    expect(r.url).toContain('example.com');
+    expect(r.title).toBeTruthy();
+    expect(r.loadTime).toBeGreaterThan(0);
   });
 
-  afterAll(async () => {
-    await engine.close();
+  it('navigate returns status 0 for unreachable domain', async () => {
+    const r = await session.navigate('https://this-domain-does-not-exist-xyz999.com');
+    expect(r.status).toBe(0);
   });
 
-  beforeEach(async () => {
-    session = await engine.createSession();
-  });
-
-  afterEach(async () => {
-    await session.close();
-  });
-
-  it('creates a session with a unique id', async () => {
-    const s1 = await engine.createSession();
-    const s2 = await engine.createSession();
-    expect(s1.id).not.toBe(s2.id);
-    await s2.close();
-  });
-
-  it('navigates to a URL and returns page metrics', async () => {
-    const result = await session.navigate('https://example.com');
-    expect(result.url).toContain('example.com');
-    expect(result.title).toBeTruthy();
-    expect(result.content).toContain('<html');
-  });
-
-  it('clicks an element by selector', async () => {
+  it('click navigates to linked page', async () => {
     await session.navigate('https://example.com');
-    const title = await session.title();
+    const before = await session.evaluate<string>('window.location.href');
     await session.click('a');
-    // Clicking the link navigates away
-    const newUrl = session.url;
-    expect(newUrl).not.toBe('https://example.com/');
+    await session.waitForSelector('body');
+    const after = await session.evaluate<string>('window.location.href');
+    expect(after).not.toBe(before);
   });
 
-  it('fills and types into an input', async () => {
-    await session.navigate('https://example.com/contact');
-    const input = await session.$('input[type="text"]');
-    if (input) {
-      await session.fill('input[type="text"]', 'Test User');
-      const value = await session.evaluate(() => {
-        const el = document.querySelector('input[type="text"]') as HTMLInputElement;
-        return el?.value;
-      });
-      expect(value).toBe('Test User');
-    }
-  });
-
-  it('evaluates JavaScript on the page', async () => {
+  it('throws for non-existent selector on click', async () => {
     await session.navigate('https://example.com');
-    const title = await session.evaluate('document.title');
-    expect(title).toBe('Example Domain');
+    await expect(session.click('#does-not-exist')).rejects.toThrow();
   });
 
-  it('takes a screenshot', async () => {
-    await session.navigate('https://example.com');
-    const screenshot = await session.screenshot();
-    expect(screenshot).toBeInstanceOf(Buffer);
-    expect(screenshot.length).toBeGreaterThan(1000);
+  it('fill persists on the page', async () => {
+    await session.navigate('data:text/html,<input id="test-input" type="text"/>');
+    await session.fill('#test-input', 'Yash Jaiswal');
+    const value = await session.evaluate<string>("document.getElementById('test-input').value");
+    expect(value).toBe('Yash Jaiswal');
   });
 
-  it('throws on closed session', async () => {
-    await session.close();
-    await expect(session.navigate('https://example.com')).rejects.toThrow();
+  it('type simulates character-by-character input', async () => {
+    await session.navigate('data:text/html,<input id="t" type="text"/>');
+    await session.type('#t', 'hello');
+    const value = await session.evaluate<string>("document.getElementById('t').value");
+    expect(value).toBe('hello');
+  });
+
+  it('screenshot returns valid PNG buffer', async () => {
+    await session.navigate('data:text/html,<body style="background:#ff0000"></body>');
+    const buf = await session.screenshot();
+    expect(Buffer.isBuffer(buf)).toBe(true);
+    expect(buf.length).toBeGreaterThan(100);
+    expect(buf[0]).toBe(0x89); // PNG magic
+  });
+
+  it('pdf returns valid PDF buffer', async () => {
+    await session.navigate('data:text/html,<body><h1>Test</h1></body>');
+    const buf = await session.pdf();
+    expect(Buffer.isBuffer(buf)).toBe(true);
+    expect(buf.length).toBeGreaterThan(100);
+    expect(buf[0]).toBe(0x25); // %PDF
+  });
+
+  it('evaluate returns JS expression result', async () => {
+    await session.navigate('data:text/html,<p id="msg">Hello</p>');
+    const text = await session.evaluate<string>("document.getElementById('msg').textContent");
+    expect(text).toBe('Hello');
+  });
+
+  it('evaluate returns computed values', async () => {
+    await session.navigate('data:text/html,<body></body>');
+    const val = await session.evaluate<number>('() => 42 + 58');
+    expect(val).toBe(100);
   });
 });
 
-describe('BrowserEngine', () => {
-  it('launches in headless mode', async () => {
-    const engine = new BrowserEngine({ headless: true });
-    await engine.launch();
-    expect(engine.isLaunched()).toBe(true);
-    await engine.close();
+// ── Multi-Tab ──────────────────────────────────────────────────────────────
+
+describe('BrowserSession — multi-tab workflows', () => {
+  let pool: ContextPool;
+  let session: BrowserSession;
+
+  beforeAll(async () => {
+    pool = new ContextPool(POOL_OPTS, BROWSER_OPTS);
+    await pool.initialize();
+  });
+  afterAll(async () => { await pool.destroy(); });
+  beforeEach(async () => { session = await pool.acquire(); });
+  afterEach(async () => { pool.release(session); });
+
+  it('opens a new tab and it is accessible', async () => {
+    await session.navigate('https://example.com');
+    const mainUrl = await session.evaluate<string>('window.location.href');
+    const tabIndex = await session.openTab('https://httpbin.org/html');
+    expect(tabIndex).toBe(1);
+    const tabUrl = await session.evaluateOn<string>('window.location.href', tabIndex);
+    expect(tabUrl).toContain('httpbin.org');
+    // Main page still on original URL
+    const backUrl = await session.evaluate<string>('window.location.href');
+    expect(backUrl).toBe(mainUrl);
   });
 
-  it('creates multiple isolated sessions', async () => {
-    const engine = new BrowserEngine({ headless: true });
-    await engine.launch();
-    const [s1, s2] = await Promise.all([
-      engine.createSession(),
-      engine.createSession(),
+  it('newPage() creates an accessible blank page', async () => {
+    await session.navigate('https://example.com');
+    const idx = await session.newPage();
+    expect(idx).toBe(1);
+    expect(session.pageCount()).toBe(2);
+  });
+
+  it('pageUrls() returns all open page URLs', async () => {
+    await session.navigate('https://example.com');
+    await session.openTab('https://httpbin.org/html', false);
+    await session.openTab('data:text/html,<h1>Tab3</h1>', false);
+    const urls = session.pageUrls();
+    expect(urls.length).toBe(3);
+    expect(urls[0]).toContain('example.com');
+    expect(urls[1]).toContain('httpbin.org');
+    expect(urls[2]).toMatch(/^data:text/);
+  });
+
+  it('switchPage() changes active page', async () => {
+    await session.navigate('https://example.com');
+    await session.openTab('https://httpbin.org/html', false);
+    // Initially on page 0
+    const title0 = await session.evaluate<string>('document.title');
+    // Switch to page 1
+    await session.switchPage(1);
+    const title1 = await session.evaluateOn<string>('document.title', 1);
+    expect(title0).toContain('Example');
+    expect(title1).toContain('HTML');
+  });
+
+  it('closePage() closes specific tab', async () => {
+    await session.navigate('https://example.com');
+    const idx = await session.openTab('https://httpbin.org/html', true);
+    expect(session.pageCount()).toBe(2);
+    await session.closePage(idx);
+    expect(session.pageCount()).toBe(1);
+    // Still on original page
+    const url = await session.evaluate<string>('window.location.href');
+    expect(url).toContain('example.com');
+  });
+
+  it('closePage() with no index closes active page', async () => {
+    await session.navigate('https://example.com');
+    await session.openTab('https://httpbin.org/html', true);
+    expect(session.pageCount()).toBe(2);
+    await session.closePage(); // close active (tab 1)
+    expect(session.pageCount()).toBe(1);
+    // Should have switched back to tab 0
+    const url = await session.evaluate<string>('window.location.href');
+    expect(url).toContain('example.com');
+  });
+
+  it('closeOtherPages() keeps only active open', async () => {
+    await session.navigate('https://example.com');
+    await session.openTab('https://httpbin.org/html', false);
+    await session.openTab('data:text/html,<h1>Tab3</h1>', false);
+    expect(session.pageCount()).toBe(3);
+    await session.closeOtherPages();
+    expect(session.pageCount()).toBe(1);
+  });
+
+  it('navigate creates a new page if none exist', async () => {
+    // Start fresh — no pages yet
+    const r = await session.navigate('https://example.com');
+    expect(r.status).toBe(200);
+    expect(session.pageCount()).toBe(1);
+  });
+
+  it('navigate on existing page navigates it', async () => {
+    await session.navigate('https://example.com');
+    const r = await session.navigate('https://httpbin.org/html');
+    expect(r.url).toContain('httpbin.org');
+    expect(session.pageCount()).toBe(1); // same page, navigated
+  });
+
+  it('openTab without switchTo keeps original active', async () => {
+    await session.navigate('https://example.com');
+    await session.openTab('https://httpbin.org/html', false);
+    const title = await session.evaluate<string>('document.title');
+    expect(title).toContain('Example');
+  });
+
+  it('evaluateOn() runs on specific tab', async () => {
+    await session.navigate('https://example.com');
+    await session.openTab('data:text/html,<div id="tab2">Content from tab 2</div>', true);
+    const text = await session.evaluateOn<string>("document.getElementById('tab2').textContent", 1);
+    expect(text).toBe('Content from tab 2');
+  });
+
+  it('screenshot of specific tab', async () => {
+    await session.navigate('data:text/html,<body style="background:red"></body>');
+    const tabIdx = await session.openTab('data:text/html,<body style="background:blue"></body>', true);
+    const buf = await session.screenshot({ pageIndex: 0 }); // screenshot tab 0
+    expect(Buffer.isBuffer(buf)).toBe(true);
+  });
+
+  it('throws when switching to out-of-range page', async () => {
+    await session.navigate('https://example.com');
+    await expect(session.switchPage(99)).rejects.toThrow('out of range');
+  });
+
+  it('throws when evaluating on closed page', async () => {
+    await session.navigate('https://example.com');
+    await session.openTab('https://httpbin.org/html', false);
+    await session.closePage(1);
+    await expect(session.evaluateOn('document.title', 1)).rejects.toThrow('closed');
+  });
+});
+
+// ── Auth & Cookie Persistence ───────────────────────────────────────────────
+
+describe('BrowserSession — auth & cookie persistence', () => {
+  let pool: ContextPool;
+  let session: BrowserSession;
+
+  beforeAll(async () => {
+    pool = new ContextPool(POOL_OPTS, BROWSER_OPTS);
+    await pool.initialize();
+  });
+  afterAll(async () => { await pool.destroy(); });
+  beforeEach(async () => { session = await pool.acquire(); });
+  afterEach(async () => { pool.release(session); });
+
+  it('localStorage persists across navigation within same tab', async () => {
+    await session.navigate('https://example.com');
+    await session.evaluate(() => localStorage.setItem('token', 'abc-123'));
+    await session.navigate('https://example.com');
+    const token = await session.evaluate<string>('localStorage.getItem("token")');
+    expect(token).toBe('abc-123');
+  });
+
+  it('localStorage persists across tabs in same session', async () => {
+    await session.navigate('https://example.com');
+    await session.evaluate(() => localStorage.setItem('session', 'tab1-data'));
+    const tabIdx = await session.openTab('https://example.com', true);
+    // Set different value in tab 2
+    await session.evaluate(() => localStorage.setItem('session', 'tab2-data'));
+    // Tab 1 should still have its own value
+    const tab1Value = await session.evaluateOn<string>('localStorage.getItem("session")', 0);
+    const tab2Value = await session.evaluateOn<string>('localStorage.getItem("session")', tabIdx);
+    expect(tab1Value).toBe('tab1-data');
+    expect(tab2Value).toBe('tab2-data');
+  });
+
+  it('cookies set in one tab are visible in another tab', async () => {
+    await session.navigate('https://example.com');
+    await session.evaluate(() => { document.cookie = 'user=hash; path=/'; });
+    const tabIdx = await session.openTab('https://example.com', true);
+    const cookie = await session.evaluateOn<string>('document.cookie', tabIdx);
+    expect(cookie).toContain('user=hash');
+  });
+
+  it('sessionStorage persists across page navigations', async () => {
+    await session.navigate('https://example.com');
+    await session.evaluate(() => sessionStorage.setItem('key', 'value1'));
+    await session.navigate('https://example.com');
+    const v = await session.evaluate<string>('sessionStorage.getItem("key")');
+    expect(v).toBe('value1');
+  });
+});
+
+// ── Pool Isolation ─────────────────────────────────────────────────────────
+
+describe('BrowserSession — pool isolation', () => {
+  let pool: ContextPool;
+
+  beforeAll(async () => {
+    pool = new ContextPool(POOL_OPTS, BROWSER_OPTS);
+    await pool.initialize();
+  });
+  afterAll(async () => { await pool.destroy(); });
+
+  it('two sessions have isolated cookies', async () => {
+    const [s1, s2] = await Promise.all([pool.acquire(), pool.acquire()]);
+    await s1.navigate('https://example.com');
+    await s2.navigate('https://example.com');
+    await s1.evaluate(() => { document.cookie = 's1only=secret'; });
+    const s2cookie = await s2.evaluate<string>('document.cookie');
+    expect(s2cookie).not.toContain('s1only');
+    pool.release(s1);
+    pool.release(s2);
+  });
+
+  it('two sessions have isolated localStorage', async () => {
+    const [s1, s2] = await Promise.all([pool.acquire(), pool.acquire()]);
+    await s1.navigate('https://example.com');
+    await s2.navigate('https://example.com');
+    await s1.evaluate(() => localStorage.setItem('token', 's1-secret'));
+    const s2token = await s2.evaluate<string>('localStorage.getItem("token")');
+    expect(s2token).toBeNull();
+    pool.release(s1);
+    pool.release(s2);
+  });
+
+  it('two sessions can be on different URLs simultaneously', async () => {
+    const [s1, s2] = await Promise.all([pool.acquire(), pool.acquire()]);
+    const [r1, r2] = await Promise.all([
+      s1.navigate('https://example.com'),
+      s2.navigate('https://httpbin.org/html'),
     ]);
-    expect(s1.id).not.toBe(s2.id);
-    await Promise.all([s1.close(), s2.close()]);
-    await engine.close();
+    expect(r1.url).toContain('example.com');
+    expect(r2.url).toContain('httpbin.org');
+    pool.release(s1);
+    pool.release(s2);
   });
 
-  it('respects viewport option', async () => {
-    const engine = new BrowserEngine({ headless: true });
-    await engine.launch();
-    const session = await engine.createSession({ viewport: { width: 1920, height: 1080 } });
-    const viewport = await session.evaluate(() => ({
-      width: window.innerWidth,
-      height: window.innerHeight,
-    }));
-    expect(viewport.width).toBe(1920);
-    expect(viewport.height).toBe(1080);
+  it('pool.acquire() returns session with unique id', async () => {
+    const [s1, s2] = await Promise.all([pool.acquire(), pool.acquire()]);
+    expect(s1.id).not.toBe(s2.id);
+    pool.release(s1);
+    pool.release(s2);
+  });
+});
+
+// ── Close & Pool Lifecycle ─────────────────────────────────────────────────
+
+describe('BrowserSession — close & pool lifecycle', () => {
+  let pool: ContextPool;
+
+  beforeAll(async () => {
+    pool = new ContextPool(POOL_OPTS, BROWSER_OPTS);
+    await pool.initialize();
+  });
+  afterAll(async () => { await pool.destroy(); });
+
+  it('release() removes session from active pool', async () => {
+    const session = await pool.acquire();
+    const id = session.id;
+    pool.release(session);
+    expect(pool.getSession(id)).toBeUndefined();
+  });
+
+  it('close() makes navigate throw', async () => {
+    const session = await pool.acquire();
     await session.close();
-    await engine.close();
+    await expect(session.navigate('https://example.com')).rejects.toThrow();
+  });
+
+  it('pool.stats() reflects acquire/release cycle', async () => {
+    expect(pool.stats().activeContexts).toBe(0);
+    const s1 = await pool.acquire();
+    expect(pool.stats().activeContexts).toBe(1);
+    const s2 = await pool.acquire();
+    expect(pool.stats().activeContexts).toBe(2);
+    pool.release(s1);
+    expect(pool.stats().activeContexts).toBe(1);
+    pool.release(s2);
+    expect(pool.stats().activeContexts).toBe(0);
   });
 });

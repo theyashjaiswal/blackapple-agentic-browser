@@ -1,4 +1,4 @@
-import type { BrowserContext, Page } from 'playwright';
+import type { BrowserContext } from 'playwright';
 export interface PageMetrics {
     url: string;
     title: string;
@@ -15,9 +15,32 @@ export declare class BrowserSession {
     readonly context: BrowserContext;
     readonly createdAt: Date;
     lastUsed: Date;
+    private _pages;
+    private _activeIndex;
     constructor(id: string, browserId: string, context: BrowserContext, createdAt: Date, lastUsed: Date);
+    private activePage;
+    private getPage;
+    /** Switch to a specific page by index. */
+    switchPage(index: number): Promise<void>;
+    /** Number of open pages in this session. */
+    pageCount(): number;
+    /** URLs of all open pages. */
+    pageUrls(): string[];
+    /** Navigate active page to URL. Creates a page if none exist. */
     navigate(url: string, options?: NavigateOptions): Promise<PageMetrics>;
+    /** Create a new blank page/tab. Returns its index. */
+    newPage(): Promise<number>;
+    /** Open a URL in a new tab. Returns tab index. */
+    openTab(url: string, switchTo?: boolean, options?: NavigateOptions): Promise<number>;
+    /** Close a specific page by index, or active page if no index provided. */
+    closePage(index?: number): Promise<void>;
+    /** Close all pages except the active one. */
+    closeOtherPages(): Promise<void>;
+    /** Evaluate JS on the active page. */
     evaluate<T = unknown>(fn: string | (() => T)): Promise<T>;
+    /** Evaluate JS on a specific page by index. */
+    evaluateOn<T = unknown>(fn: string | (() => T), pageIndex: number): Promise<T>;
+    /** Run JS before document loads on active page. */
     evaluateOnDocument<T = unknown>(fn: string | (() => T)): Promise<T>;
     click(selector: string, options?: {
         timeout?: number;
@@ -30,12 +53,13 @@ export declare class BrowserSession {
     waitForSelector(selector: string, options?: {
         timeout?: number;
         state?: 'visible' | 'hidden' | 'attached';
-    }): Promise<void>;
-    $(selector: string): Promise<ReturnType<Page['$']>>;
-    $$(selector: string): Promise<ReturnType<Page['$$']>>;
+    }): Promise<unknown>;
+    $(selector: string): Promise<unknown>;
+    $$(selector: string): Promise<unknown[]>;
     getContent(): Promise<string>;
     title(): Promise<string>;
     screenshot(options?: {
+        pageIndex?: number;
         path?: string;
         fullPage?: boolean;
         type?: 'png' | 'jpeg';
@@ -44,13 +68,17 @@ export declare class BrowserSession {
         path?: string;
         format?: 'A4' | 'Letter';
     }): Promise<Buffer>;
-    interceptRequests(handler: (route: {
+    interceptRequests(_handler: (route: {
         url: string;
         abort: () => void;
         continue: (opts?: {
             url?: string;
         }) => void;
     }) => void): Promise<void>;
+    /** Close all pages and reset to blank state.
+     *  Called by the pool when a warm session is reused.
+     *  Does NOT close the context — context belongs to the pool. */
+    resetPages(): Promise<void>;
     close(): Promise<void>;
 }
 //# sourceMappingURL=session.d.ts.map

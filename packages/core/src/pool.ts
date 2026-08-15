@@ -7,6 +7,7 @@
 
 import { randomUUID } from 'crypto';
 import { chromium, type Browser, type BrowserContext } from 'playwright';
+import { BrowserSession } from './session.js';
 
 export interface SessionOptions {
   viewport?: { width: number; height: number };
@@ -115,25 +116,25 @@ class BrowserManager {
   }
 }
 
-// ── Session ───────────────────────────────────────────────────────────────────
+// ── PooledSession ──────────────────────────────────────────────────────────────
+// PooledSession extends BrowserSession so callers get full browser API.
+// Named PooledSession to avoid shadowing the exported BrowserSession class.
 
-class BrowserSession implements Session {
-  readonly id: string;
-  readonly createdAt: Date;
-  readonly browserId: string;
-  lastUsed: Date;
-
+class PooledSession extends BrowserSession {
   constructor(
-    public context: BrowserContext,
+    context: BrowserContext,
     browserId: string,
   ) {
-    this.id = randomUUID();
-    this.createdAt = new Date();
-    this.browserId = browserId;
-    this.lastUsed = new Date();
+    super(
+      randomUUID(),          // id
+      browserId,             // browserId
+      context,               // context
+      new Date(),            // createdAt
+      new Date(),            // lastUsed
+    );
   }
 
-  async close(): Promise<void> {
+  override async close(): Promise<void> {
     await this.context.close();
   }
 }
@@ -147,7 +148,7 @@ export class ContextPool {
   private available: BrowserSession[] = [];
   private active: Map<string, BrowserSession> = new Map(); // sessionId → session
   private pending: Array<{
-    resolve: (s: BrowserSession) => void;
+    resolve: (s: PooledSession) => void;
     reject: (e: Error) => void;
     createdAt: number;
   }> = [];
@@ -195,11 +196,13 @@ export class ContextPool {
 
   // ── Acquire / Release ─────────────────────────────────────────────────────
 
-  async acquire(opts: SessionOptions = {}): Promise<BrowserSession> {
-    // 1. Warm session available
+  async acquire(opts: SessionOptions = {}): Promise<PooledSession> {
+    // 1. Warm session available — close its persistent pages to ensure fresh start.
+  // Do NOT close the context — it's managed by the pool.
     const warm = this.available.pop();
     if (warm) {
-      warm.lastUsed = new Date();
+      // Only close the pages, not the context (context belongs to the pool)
+      await warm.resetPages();
       this.active.set(warm.id, warm);
       return warm;
     }
@@ -223,7 +226,7 @@ export class ContextPool {
     });
   }
 
-  release(session: BrowserSession): void {
+  release(session: PooledSession): void {
     this.releaseById(session.id);
   }
 
@@ -244,14 +247,14 @@ export class ContextPool {
     this.drainPending();
   }
 
-  getSession(sessionId: string): BrowserSession | undefined {
+  getSession(sessionId: string): PooledSession | undefined {
     return this.active.get(sessionId);
   }
 
-  private async createSession(opts: SessionOptions): Promise<BrowserSession> {
+  private async createSession(opts: SessionOptions): Promise<PooledSession> {
     const manager = this.selectManager();
     const context = await manager.createContext(opts);
-    return new BrowserSession(context, manager.id);
+    return new PooledSession(context, manager.id);
   }
 
   // ── Manager Selection ──────────────────────────────────────────────────────

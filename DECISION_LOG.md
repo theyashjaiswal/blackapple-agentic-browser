@@ -317,3 +317,36 @@ If a WebSocket client disconnects (agent crash), we need to reclaim the session.
 ---
 
 *Last updated: Phase 1 completion, August 15 2026*
+
+---
+
+## D19 — Persistent Page Per Session
+
+**Decision:** Each `BrowserSession` keeps ONE persistent `Page` for its lifetime, not a fresh page per operation.
+
+**Reasoning:** Real browser automation workflows need login state, cookies, localStorage persisting across navigation. Agents don't close and reopen sessions for every action.
+
+**Alternatives:** Fresh page per operation (isolated, crash-proof, but destroys auth state on every call).
+
+**Outcome:** `BrowserSession` holds one persistent `_page`. When released back to warm pool, `close()` destroys the old page so next caller gets fresh context.
+
+---
+
+## D20 — Pool Release Destroys the Page
+
+**Decision:** When `BrowserSession` is released back to warm pool, its page is closed immediately.
+
+**Reasoning:** A warm session could have residual state (any URL, localStorage, cookies). New caller expects clean slate on `navigate()`.
+
+**Outcome:** `acquire()` from warm → `session.close()` → destroy old page → return context. Page created lazily on first use.
+
+---
+
+## D21 — Tests Use Real HTTP URLs
+
+**Decision:** Session tests use `https://example.com` (real server) for navigation, not `data:` URLs.
+
+**Reasoning:** `data:` URLs have security restrictions. Real-world agents navigate to real HTTPS sites. `localStorage` and auth cookies only work on real HTTP origins.
+
+**Outcome:** Navigate/click tests use `https://example.com`. PDF/screenshot tests use `data:` URLs where needed.
+
