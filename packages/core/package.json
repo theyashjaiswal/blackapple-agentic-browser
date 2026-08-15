@@ -1,7 +1,7 @@
 {
-  "name": "@blackapple/browser-core",
+  "name": "@blackapple/agentic-browser-core",
   "version": "0.1.0",
-  "description": "Headless browser engine for AI agent orchestration",
+  "description": "BlackApple Agentic Browser — headless browser engine for AI agents",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -14,7 +14,8 @@
   "scripts": {
     "build": "tsc",
     "test": "node --experimental-vm-modules node_modules/.bin/jest",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "preinstall": "npx playwright install chromium --with-deps 2>/dev/null || true"
   },
   "dependencies": {
     "playwright": "^1.48.0"
