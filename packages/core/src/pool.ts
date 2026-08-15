@@ -111,15 +111,20 @@ export class SessionPool {
   }
 
   release(session: BrowserSession): void {
-    if (!this.active.has(session.id)) return;
+    this.releaseById(session.id);
+  }
+
+  releaseById(sessionId: string): void {
+    const session = this.active.get(sessionId);
+    if (!session) return;
 
     if (this.available.length < this.options.minSessions) {
       this.available.push(session);
-      this.active.delete(session.id);
+      this.active.delete(sessionId);
       this.drainPending();
     } else {
       session.close().catch(() => {});
-      this.active.delete(session.id);
+      this.active.delete(sessionId);
     }
   }
 

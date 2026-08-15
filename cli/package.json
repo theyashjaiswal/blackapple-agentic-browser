@@ -1,0 +1,14 @@
+{
+  "name": "@blackapple/agentic-browser-cli",
+  "version": "0.1.0",
+  "description": "BlackApple Agentic Browser — CLI",
+  "type": "module",
+  "bin": { "blackapple": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@blackapple/agentic-browser-sdk": "workspace:*"
+  }
+}

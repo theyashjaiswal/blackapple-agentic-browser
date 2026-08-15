@@ -1,0 +1,12 @@
+{
+  "name": "blackapple-agentic-browser",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BlackApple Agentic Browser — headless browser for AI agent orchestration",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "dev": "npm run dev --workspaces"
+  }
+}
