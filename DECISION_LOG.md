@@ -350,3 +350,39 @@ If a WebSocket client disconnects (agent crash), we need to reclaim the session.
 
 **Outcome:** Navigate/click tests use `https://example.com`. PDF/screenshot tests use `data:` URLs where needed.
 
+---
+
+## D22 — Multi-Tab Sessions
+
+**Decision:** `BrowserSession` supports multiple pages/tabs within one session.
+
+**API:**
+- `newPage()` → creates blank tab, returns index
+- `openTab(url)` → opens URL in new tab, returns index
+- `closePage(index?)` → closes specific tab or active tab
+- `switchPage(index)` → changes active tab
+- `pageUrls()` / `pageCount()` → inspect open tabs
+- `evaluateOn(fn, index)` → run JS on specific tab
+- `screenshot({ pageIndex })` → screenshot specific tab
+
+**Reasoning:** Real browser workflows need tabs (compare products, multiple accounts, async notifications). Multi-context would require more memory. Tabs share cookies/auth — more efficient than separate contexts.
+
+**Outcome:** Auth (cookies, localStorage) persists across tabs in same session. Each session has isolated context. Pool release closes all pages but keeps context alive.
+
+---
+
+## D23 — Session State Lifecycle: Context vs Pages
+
+**Decision:** `BrowserSession.close()` closes pages AND context. Pool release closes pages but NOT context.
+
+**Reasoning:**
+- When agent is done with a session → `release()` → pages closed, context returned to pool's warm cache for reuse
+- When pool is destroyed → `close()` → pages AND context closed
+- Context is expensive to create (process + profile init). Pages are cheap.
+
+**Outcome:**
+- `pool.release(session)` → `session.resetPages()` → closes pages, keeps context warm
+- `session.close()` → closes pages AND context (full cleanup)
+- `pool.destroy()` → closes all managers → all browsers + contexts + pages closed
+
+
